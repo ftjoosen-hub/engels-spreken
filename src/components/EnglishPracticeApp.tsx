@@ -2,20 +2,21 @@
 
 import { useState, useRef, useEffect } from 'react'
 import MarkdownRenderer from './MarkdownRenderer'
-import GeminiTTS, { GEMINI_VOICES } from './GeminiTTS'
 
 interface ConversationMessage {
   id: string
   role: 'student' | 'teacher'
   content: string
   timestamp: Date
-  feedback?: {
-    grammar: number
-    pronunciation: number
-    vocabulary: number
-    fluency: number
-    comments: string
-  }
+  isPlaying?: boolean
+  audioUrl?: string
+}
+
+interface SpeechFeedback {
+  pronunciation: number
+  fluency: number
+  accuracy: number
+  comments: string
 }
 
 const CONVERSATION_TOPICS = [
@@ -31,21 +32,28 @@ const CONVERSATION_TOPICS = [
   { id: 'weather', title: 'Weer & Seizoenen', description: 'Praat over het weer en je favoriete seizoen' }
 ]
 
+// Best British voice for Cambridge English
+const CAMBRIDGE_VOICE = { name: 'Charon', style: 'Informative', description: 'Cambridge English docent stem' }
+
 export default function EnglishPracticeApp() {
   const [selectedTopic, setSelectedTopic] = useState<string>('')
   const [conversation, setConversation] = useState<ConversationMessage[]>([])
-  const [currentMessage, setCurrentMessage] = useState('')
   const [isLoading, setIsLoading] = useState(false)
-  const [isListening, setIsListening] = useState(false)
   const [sessionStarted, setSessionStarted] = useState(false)
+  const [isListening, setIsListening] = useState(false)
+  const [isTeacherSpeaking, setIsTeacherSpeaking] = useState(false)
+  const [currentPlayingId, setCurrentPlayingId] = useState<string | null>(null)
+  const [speechFeedback, setSpeechFeedback] = useState<SpeechFeedback | null>(null)
   const [showFeedback, setShowFeedback] = useState(false)
-  const [sessionFeedback, setSessionFeedback] = useState<any>(null)
-  const [selectedGeminiVoice, setSelectedGeminiVoice] = useState(GEMINI_VOICES.find(v => v.name === 'Charon') || GEMINI_VOICES[2]) // Charon for informative style
+  const [currentAudioText, setCurrentAudioText] = useState('')
+  const [highlightedWordIndex, setHighlightedWordIndex] = useState(-1)
   
   const recognitionRef = useRef<any>(null)
   const conversationRef = useRef<HTMLDivElement>(null)
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null)
+  const speechTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
-  // Voice recognition setup
+  // Voice recognition setup for pronunciation feedback
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
@@ -55,16 +63,20 @@ export default function EnglishPracticeApp() {
         recognition.interimResults = false
         recognition.lang = 'en-US'
         
-        recognition.onresult = (event: any) => {
+        recognition.onresult = async (event: any) => {
           const transcript = event.results[0][0].transcript
-          setCurrentMessage(transcript)
+          const confidence = event.results[0][0].confidence
+          
+          // Get pronunciation feedback
+          await getPronunciationFeedback(transcript, confidence)
         }
         
         recognition.onend = () => {
           setIsListening(false)
         }
         
-        recognition.onerror = () => {
+        recognition.onerror = (event: any) => {
+          console.error('Speech recognition error:', event.error)
           setIsListening(false)
         }
         
@@ -79,6 +91,105 @@ export default function EnglishPracticeApp() {
       conversationRef.current.scrollTop = conversationRef.current.scrollHeight
     }
   }, [conversation])
+
+  // Generate TTS audio and play automatically
+  const generateAndPlayTTS = async (text: string, messageId: string) => {
+    try {
+      setIsTeacherSpeaking(true)
+      setCurrentPlayingId(messageId)
+      setCurrentAudioText(text)
+      
+      // Stop any currently playing audio
+      if (currentAudioRef.current) {
+        currentAudioRef.current.pause()
+        currentAudioRef.current = null
+      }
+
+      console.log('🎙️ Generating TTS for:', text.substring(0, 50) + '...')
+      
+      const response = await fetch('/api/generate-tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: text,
+          voiceName: CAMBRIDGE_VOICE.name,
+          multiSpeaker: false,
+          style: 'Professioneel'
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`TTS API error: ${response.status}`)
+      }
+
+      const audioBlob = await response.blob()
+      const audioUrl = URL.createObjectURL(audioBlob)
+      
+      // Update message with audio URL
+      setConversation(prev => 
+        prev.map(msg => 
+          msg.id === messageId 
+            ? { ...msg, audioUrl, isPlaying: true }
+            : { ...msg, isPlaying: false }
+        )
+      )
+
+      // Create and play audio
+      const audio = new Audio(audioUrl)
+      currentAudioRef.current = audio
+      
+      // Synchronized text highlighting
+      const words = text.split(' ')
+      const avgWordsPerSecond = 2.5 // Adjust based on speech rate
+      
+      audio.onplay = () => {
+        console.log('🔊 Audio started playing')
+        setIsTeacherSpeaking(true)
+        
+        // Start word highlighting
+        let wordIndex = 0
+        const highlightInterval = setInterval(() => {
+          if (wordIndex < words.length) {
+            setHighlightedWordIndex(wordIndex)
+            wordIndex++
+          } else {
+            clearInterval(highlightInterval)
+            setHighlightedWordIndex(-1)
+          }
+        }, (1000 / avgWordsPerSecond))
+        
+        audio.onended = () => {
+          clearInterval(highlightInterval)
+          setHighlightedWordIndex(-1)
+          setIsTeacherSpeaking(false)
+          setCurrentPlayingId(null)
+          setCurrentAudioText('')
+          URL.revokeObjectURL(audioUrl)
+          currentAudioRef.current = null
+          
+          // Update message state
+          setConversation(prev => 
+            prev.map(msg => ({ ...msg, isPlaying: false }))
+          )
+        }
+      }
+      
+      audio.onerror = (error) => {
+        console.error('Audio playback error:', error)
+        setIsTeacherSpeaking(false)
+        setCurrentPlayingId(null)
+        setHighlightedWordIndex(-1)
+      }
+
+      await audio.play()
+      
+    } catch (error) {
+      console.error('TTS Error:', error)
+      setIsTeacherSpeaking(false)
+      setCurrentPlayingId(null)
+      setHighlightedWordIndex(-1)
+    }
+  }
 
   const startSession = async () => {
     if (!selectedTopic) return
@@ -105,6 +216,8 @@ Instructions for you as the AI teacher:
 - Be patient and encouraging
 - Focus on communication rather than perfection
 - Keep responses conversational, not like an interview
+- Use Cambridge English pronunciation and vocabulary
+- Keep responses to 2-3 sentences maximum for better TTS experience
 
 Topic: ${topic.description}
 
@@ -121,7 +234,11 @@ Please start the conversation now with a warm greeting and an opening question a
           content: data.response,
           timestamp: new Date()
         }
+        
         setConversation([teacherMessage])
+        
+        // Automatically generate and play TTS
+        await generateAndPlayTTS(data.response, teacherMessage.id)
         
       }
     } catch (error) {
@@ -131,27 +248,92 @@ Please start the conversation now with a warm greeting and an opening question a
     }
   }
 
-  const sendMessage = async () => {
-    if (!currentMessage.trim() || isLoading) return
+  const startListening = () => {
+    if (!recognitionRef.current || isListening || isTeacherSpeaking) return
+    
+    setSpeechFeedback(null)
+    setShowFeedback(false)
+    setIsListening(true)
+    recognitionRef.current.start()
+    
+    // Auto-stop after 10 seconds
+    speechTimeoutRef.current = setTimeout(() => {
+      if (recognitionRef.current && isListening) {
+        recognitionRef.current.stop()
+      }
+    }, 10000)
+  }
 
-    const studentMessage: ConversationMessage = {
-      id: Date.now().toString(),
-      role: 'student',
-      content: currentMessage,
-      timestamp: new Date()
+  const stopListening = () => {
+    if (recognitionRef.current && isListening) {
+      recognitionRef.current.stop()
     }
+    if (speechTimeoutRef.current) {
+      clearTimeout(speechTimeoutRef.current)
+    }
+    setIsListening(false)
+  }
 
-    setConversation(prev => [...prev, studentMessage])
-    setCurrentMessage('')
-    setIsLoading(true)
-
+  const getPronunciationFeedback = async (transcript: string, confidence: number) => {
     try {
+      setIsLoading(true)
+      
+      // Add student message to conversation
+      const studentMessage: ConversationMessage = {
+        id: Date.now().toString(),
+        role: 'student',
+        content: transcript,
+        timestamp: new Date()
+      }
+      
+      setConversation(prev => [...prev, studentMessage])
+
+      // Get pronunciation feedback
+      const feedbackResponse = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: `Analyze this English pronunciation from a Dutch HAVO 2 student (A2 level). The speech recognition confidence was ${(confidence * 100).toFixed(1)}%.
+
+Student said: "${transcript}"
+
+Provide pronunciation feedback in this exact JSON format:
+{
+  "pronunciation": [score 1-10],
+  "fluency": [score 1-10],
+  "accuracy": [score 1-10],
+  "comments": "Specific feedback in Dutch about pronunciation, what was good and what could be improved. Be encouraging but specific."
+}
+
+Consider:
+- A2 level expectations
+- Common Dutch speaker pronunciation challenges
+- Speech recognition confidence level
+- Encourage the student while giving constructive feedback`,
+          aiModel: 'smart'
+        })
+      })
+
+      if (feedbackResponse.ok) {
+        const feedbackData = await feedbackResponse.json()
+        try {
+          const jsonMatch = feedbackData.response.match(/\{[\s\S]*\}/)
+          if (jsonMatch) {
+            const feedback = JSON.parse(jsonMatch[0])
+            setSpeechFeedback(feedback)
+            setShowFeedback(true)
+          }
+        } catch (e) {
+          console.error('Error parsing feedback:', e)
+        }
+      }
+
       // Get teacher response
       const conversationHistory = [...conversation, studentMessage]
         .map(msg => `${msg.role === 'teacher' ? 'Teacher' : 'Student'}: ${msg.content}`)
         .join('\n')
 
-      const response = await fetch('/api/chat', {
+      const teacherResponse = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -165,269 +347,70 @@ Guidelines:
 - Ask follow-up questions to keep the conversation going
 - Use A2 level English (simple, clear)
 - Be encouraging and positive
-- Occasionally acknowledge good language use
-- If the student makes errors, gently model correct usage without explicitly correcting
-- Keep the conversation flowing naturally
+- Keep responses to 2-3 sentences maximum
+- Use Cambridge English style
 
 Respond as the teacher would in this conversation.`,
           aiModel: 'smart'
         })
       })
 
-      if (response.ok) {
-        const data = await response.json()
-        
-        // Get feedback for the student's message
-        const feedbackResponse = await fetch('/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            message: `Analyze this English response from a Dutch HAVO 2 student (A2 level) and provide detailed feedback:
-
-Student's response: "${studentMessage.content}"
-
-Please provide feedback in this exact JSON format:
-{
-  "grammar": [score 1-10],
-  "pronunciation": [score 1-10 based on likely pronunciation of written text],
-  "vocabulary": [score 1-10],
-  "fluency": [score 1-10 based on sentence structure and flow],
-  "comments": "Specific constructive feedback in Dutch, mentioning what was good and what could be improved. Keep it encouraging and specific."
-}
-
-Consider A2 level expectations:
-- Grammar: Basic sentence structures, simple tenses
-- Vocabulary: Common everyday words appropriate for the topic
-- Fluency: Ability to express ideas clearly, even if simply
-- Pronunciation: Estimate based on likely Dutch speaker challenges
-
-Be encouraging but honest in your assessment.`,
-            aiModel: 'smart'
-          })
-        })
-
-        let feedback = null
-        if (feedbackResponse.ok) {
-          const feedbackData = await feedbackResponse.json()
-          try {
-            // Try to extract JSON from the response
-            const jsonMatch = feedbackData.response.match(/\{[\s\S]*\}/)
-            if (jsonMatch) {
-              feedback = JSON.parse(jsonMatch[0])
-            }
-          } catch (e) {
-            console.error('Error parsing feedback:', e)
-          }
-        }
-
+      if (teacherResponse.ok) {
+        const teacherData = await teacherResponse.json()
         const teacherMessage: ConversationMessage = {
           id: (Date.now() + 1).toString(),
           role: 'teacher',
-          content: data.response,
+          content: teacherData.response,
           timestamp: new Date()
         }
 
-        // Update the student message with feedback
-        setConversation(prev => [
-          ...prev.slice(0, -1),
-          { ...studentMessage, feedback },
-          teacherMessage
-        ])
+        setConversation(prev => [...prev, teacherMessage])
         
+        // Automatically generate and play TTS for teacher response
+        await generateAndPlayTTS(teacherData.response, teacherMessage.id)
       }
+      
     } catch (error) {
-      console.error('Error sending message:', error)
-    } finally {
-      setIsLoading(false)
-    }
-  }
-
-  const toggleVoiceRecognition = () => {
-    if (!recognitionRef.current) return
-
-    if (isListening) {
-      recognitionRef.current.stop()
-    } else {
-      recognitionRef.current.start()
-      setIsListening(true)
-    }
-  }
-
-  const endSession = async () => {
-    if (conversation.length === 0) return
-
-    setIsLoading(true)
-    try {
-      const conversationHistory = conversation
-        .map(msg => `${msg.role === 'teacher' ? 'Teacher' : 'Student'}: ${msg.content}`)
-        .join('\n')
-
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: `Provide a comprehensive session summary and feedback for this English conversation practice session with a Dutch HAVO 2 student (A2 level):
-
-${conversationHistory}
-
-Please provide feedback in this exact JSON format:
-{
-  "overallGrammar": [score 1-10],
-  "overallPronunciation": [score 1-10],
-  "overallVocabulary": [score 1-10],
-  "overallFluency": [score 1-10],
-  "strengths": ["strength 1", "strength 2", "strength 3"],
-  "improvements": ["improvement area 1", "improvement area 2", "improvement area 3"],
-  "specificTips": ["tip 1", "tip 2", "tip 3"],
-  "encouragement": "Encouraging message in Dutch about their progress and effort"
-}
-
-Base your assessment on A2 level expectations and be constructive and encouraging.`,
-          aiModel: 'smart'
-        })
-      })
-
-      if (response.ok) {
-        const data = await response.json()
-        try {
-          const jsonMatch = data.response.match(/\{[\s\S]*\}/)
-          if (jsonMatch) {
-            const feedback = JSON.parse(jsonMatch[0])
-            setSessionFeedback(feedback)
-            setShowFeedback(true)
-          }
-        } catch (e) {
-          console.error('Error parsing session feedback:', e)
-        }
-      }
-    } catch (error) {
-      console.error('Error getting session feedback:', error)
+      console.error('Error getting feedback:', error)
     } finally {
       setIsLoading(false)
     }
   }
 
   const resetSession = () => {
+    // Stop any playing audio
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause()
+      currentAudioRef.current = null
+    }
+    
     setSessionStarted(false)
     setConversation([])
-    setCurrentMessage('')
     setSelectedTopic('')
+    setIsTeacherSpeaking(false)
+    setCurrentPlayingId(null)
+    setSpeechFeedback(null)
     setShowFeedback(false)
-    setSessionFeedback(null)
+    setHighlightedWordIndex(-1)
+    setCurrentAudioText('')
   }
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      sendMessage()
-    }
-  }
-
-  if (showFeedback && sessionFeedback) {
+  const renderHighlightedText = (text: string, highlightIndex: number) => {
+    const words = text.split(' ')
     return (
-      <div className="max-w-4xl mx-auto">
-        <div className="bg-white rounded-xl shadow-lg p-8">
-          <div className="text-center mb-8">
-            <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-              <svg className="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-            </div>
-            <h2 className="text-3xl font-bold text-gray-800 mb-2">Sessie Voltooid!</h2>
-            <p className="text-gray-600">Hier is je persoonlijke feedback</p>
-          </div>
-
-          {/* Overall Scores */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-            <div className="text-center p-4 bg-blue-50 rounded-lg">
-              <div className="text-2xl font-bold text-blue-600">{sessionFeedback.overallGrammar}/10</div>
-              <div className="text-sm text-blue-800">Grammatica</div>
-            </div>
-            <div className="text-center p-4 bg-green-50 rounded-lg">
-              <div className="text-2xl font-bold text-green-600">{sessionFeedback.overallPronunciation}/10</div>
-              <div className="text-sm text-green-800">Uitspraak</div>
-            </div>
-            <div className="text-center p-4 bg-purple-50 rounded-lg">
-              <div className="text-2xl font-bold text-purple-600">{sessionFeedback.overallVocabulary}/10</div>
-              <div className="text-sm text-purple-800">Woordenschat</div>
-            </div>
-            <div className="text-center p-4 bg-orange-50 rounded-lg">
-              <div className="text-2xl font-bold text-orange-600">{sessionFeedback.overallFluency}/10</div>
-              <div className="text-sm text-orange-800">Vloeiendheid</div>
-            </div>
-          </div>
-
-          {/* Detailed Feedback */}
-          <div className="grid md:grid-cols-2 gap-6 mb-8">
-            <div className="bg-green-50 p-6 rounded-lg">
-              <h3 className="text-lg font-semibold text-green-800 mb-4 flex items-center">
-                <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5" />
-                </svg>
-                Sterke Punten
-              </h3>
-              <ul className="space-y-2">
-                {sessionFeedback.strengths?.map((strength: string, index: number) => (
-                  <li key={index} className="flex items-start">
-                    <span className="text-green-600 mr-2">✓</span>
-                    <span className="text-green-700">{strength}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-
-            <div className="bg-blue-50 p-6 rounded-lg">
-              <h3 className="text-lg font-semibold text-blue-800 mb-4 flex items-center">
-                <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                </svg>
-                Verbeterpunten
-              </h3>
-              <ul className="space-y-2">
-                {sessionFeedback.improvements?.map((improvement: string, index: number) => (
-                  <li key={index} className="flex items-start">
-                    <span className="text-blue-600 mr-2">→</span>
-                    <span className="text-blue-700">{improvement}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
-
-          {/* Tips */}
-          <div className="bg-yellow-50 p-6 rounded-lg mb-8">
-            <h3 className="text-lg font-semibold text-yellow-800 mb-4 flex items-center">
-              <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-              </svg>
-              Tips voor Volgende Keer
-            </h3>
-            <ul className="space-y-2">
-              {sessionFeedback.specificTips?.map((tip: string, index: number) => (
-                <li key={index} className="flex items-start">
-                  <span className="text-yellow-600 mr-2">💡</span>
-                  <span className="text-yellow-700">{tip}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          {/* Encouragement */}
-          <div className="bg-purple-50 p-6 rounded-lg mb-8 text-center">
-            <h3 className="text-lg font-semibold text-purple-800 mb-3">Bemoediging</h3>
-            <p className="text-purple-700 italic">{sessionFeedback.encouragement}</p>
-          </div>
-
-          {/* Actions */}
-          <div className="flex justify-center space-x-4">
-            <button
-              onClick={resetSession}
-              className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
-            >
-              Nieuwe Sessie Starten
-            </button>
-          </div>
-        </div>
+      <div className="leading-relaxed">
+        {words.map((word, index) => (
+          <span
+            key={index}
+            className={`${
+              index === highlightIndex 
+                ? 'bg-yellow-200 text-gray-900 font-semibold' 
+                : ''
+            } transition-all duration-200`}
+          >
+            {word}{index < words.length - 1 ? ' ' : ''}
+          </span>
+        ))}
       </div>
     )
   }
@@ -463,7 +446,7 @@ Base your assessment on A2 level expectations and be constructive and encouragin
               disabled={!selectedTopic || isLoading}
               className="px-8 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-medium text-lg"
             >
-              {isLoading ? 'Sessie wordt gestart...' : 'Start Gesprek'}
+              {isLoading ? 'Docent wordt gestart...' : 'Start Gesprek'}
             </button>
           </div>
 
@@ -477,19 +460,19 @@ Base your assessment on A2 level expectations and be constructive and encouragin
               </li>
               <li className="flex items-start">
                 <span className="text-blue-600 mr-2">2.</span>
-                Voer een natuurlijk gesprek in het Engels met de AI-docent (die ook spreekt!)
+                De AI-docent begint automatisch te spreken in Cambridge Engels
               </li>
               <li className="flex items-start">
                 <span className="text-blue-600 mr-2">3.</span>
-                Krijg directe feedback op je grammatica, uitspraak, woordenschat en vloeiendheid
+                Luister naar de docent en lees de tekst mee (wordt gesynchroniseerd)
               </li>
               <li className="flex items-start">
                 <span className="text-blue-600 mr-2">4.</span>
-                Ontvang een uitgebreide evaluatie aan het einde van de sessie
+                Klik op de microfoon om te antwoorden in het Engels
               </li>
               <li className="flex items-start">
-                <span className="text-blue-600 mr-2">💡</span>
-                <strong>Tip:</strong> De docent spreekt in Cambridge Engels - luister goed naar de uitspraak!
+                <span className="text-blue-600 mr-2">5.</span>
+                Krijg directe feedback op je uitspraak en vloeiendheid
               </li>
             </ul>
           </div>
@@ -507,16 +490,18 @@ Base your assessment on A2 level expectations and be constructive and encouragin
             <h2 className="text-xl font-semibold">
               {CONVERSATION_TOPICS.find(t => t.id === selectedTopic)?.title}
             </h2>
-            <p className="text-blue-100 text-sm">
-              Gesprek in het Engels - A2 Niveau • Gemini AI TTS ({selectedGeminiVoice.name})
+            <p className="text-blue-100 text-sm flex items-center">
+              <span className={`w-2 h-2 rounded-full mr-2 ${isTeacherSpeaking ? 'bg-green-400 animate-pulse' : 'bg-gray-400'}`}></span>
+              Cambridge Engels Docent • Gemini AI TTS ({CAMBRIDGE_VOICE.name})
+              {isTeacherSpeaking && <span className="ml-2">🔊 Spreekt...</span>}
             </p>
           </div>
           <div className="flex items-center space-x-2">
             <button
-              onClick={endSession}
+              onClick={resetSession}
               className="px-4 py-2 bg-blue-700 hover:bg-blue-800 rounded-lg transition-colors"
             >
-              Sessie Beëindigen
+              Nieuwe Sessie
             </button>
           </div>
         </div>
@@ -534,49 +519,39 @@ Base your assessment on A2 level expectations and be constructive and encouragin
                 }`}
               >
                 <div
-                  className={`max-w-xs lg:max-w-md px-4 py-2 rounded-lg ${
+                  className={`max-w-xs lg:max-w-md px-4 py-3 rounded-lg ${
                     message.role === 'student'
                       ? 'bg-blue-600 text-white'
-                     : 'bg-gray-200 text-gray-800'
+                      : `bg-gray-200 text-gray-800 ${message.isPlaying ? 'ring-2 ring-green-400' : ''}`
                   }`}
                 >
-                  <div className="text-sm font-medium mb-1">
-                    {message.role === 'student' ? 'Jij' : 'Docent'}
+                  <div className="text-sm font-medium mb-2 flex items-center">
+                    {message.role === 'student' ? (
+                      <>
+                        <span className="mr-2">🎓</span>
+                        Jij
+                      </>
+                    ) : (
+                      <>
+                        <span className="mr-2">👨‍🏫</span>
+                        Cambridge Docent
+                        {message.isPlaying && (
+                          <span className="ml-2 text-green-600">
+                            <span className="animate-pulse">🔊</span>
+                          </span>
+                        )}
+                      </>
+                    )}
                   </div>
-                  <div>{message.content}</div>
+                  
+                  {/* Synchronized text highlighting for teacher messages */}
+                  {message.role === 'teacher' && currentPlayingId === message.id ? (
+                    renderHighlightedText(message.content, highlightedWordIndex)
+                  ) : (
+                    <div>{message.content}</div>
+                  )}
                 </div>
               </div>
-             
-             {/* Gemini TTS for teacher messages */}
-             {message.role === 'teacher' && (
-               <div className="flex justify-start mt-2">
-                 <GeminiTTS
-                   content={message.content}
-                   isMarkdown={false}
-                   isStreaming={false}
-                   selectedVoice={selectedGeminiVoice}
-                   selectedEmotion={{ name: 'Professioneel', prompt: 'Spreek dit uit op een professionele, educatieve manier als een vriendelijke docent: ' }}
-                   hideSettings={true}
-                   className="ml-4"
-                 />
-               </div>
-             )}
-
-              {/* Feedback for student messages */}
-              {message.role === 'student' && message.feedback && (
-                <div className="ml-4 bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-sm">
-                  <div className="flex justify-between items-center mb-2">
-                    <span className="font-medium text-yellow-800">Feedback:</span>
-                    <div className="flex space-x-2 text-xs">
-                      <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded">G: {message.feedback.grammar}/10</span>
-                      <span className="bg-green-100 text-green-800 px-2 py-1 rounded">U: {message.feedback.pronunciation}/10</span>
-                      <span className="bg-purple-100 text-purple-800 px-2 py-1 rounded">W: {message.feedback.vocabulary}/10</span>
-                      <span className="bg-orange-100 text-orange-800 px-2 py-1 rounded">V: {message.feedback.fluency}/10</span>
-                    </div>
-                  </div>
-                  <p className="text-yellow-700">{message.feedback.comments}</p>
-                </div>
-              )}
             </div>
           ))}
 
@@ -596,55 +571,89 @@ Base your assessment on A2 level expectations and be constructive and encouragin
           )}
         </div>
 
-        {/* Input Area */}
-        <div className="border-t p-4">
-          <div className="flex items-end space-x-2">
-            <div className="flex-1">
-              <textarea
-                value={currentMessage}
-                onChange={(e) => setCurrentMessage(e.target.value)}
-                onKeyPress={handleKeyPress}
-                placeholder="Type je antwoord in het Engels..."
-                className="w-full p-3 border border-gray-300 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
-                rows={2}
-                disabled={isLoading}
-              />
-            </div>
-            
-            {/* Voice Input Button */}
-            {recognitionRef.current && (
+        {/* Speech Feedback */}
+        {showFeedback && speechFeedback && (
+          <div className="border-t bg-yellow-50 p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-semibold text-yellow-800 flex items-center">
+                <span className="mr-2">📊</span>
+                Uitspraak Feedback
+              </h3>
               <button
-                onClick={toggleVoiceRecognition}
-                disabled={isLoading}
-                className={`p-3 rounded-lg transition-colors ${
-                  isListening 
-                    ? 'bg-red-500 text-white animate-pulse' 
-                    : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
-                }`}
-                title={isListening ? "Stop opnemen" : "Start spraakherkenning"}
+                onClick={() => setShowFeedback(false)}
+                className="text-yellow-600 hover:text-yellow-800"
               >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-                </svg>
+                ✕
               </button>
-            )}
-            
-            {/* Send Button */}
-            <button
-              onClick={sendMessage}
-              disabled={!currentMessage.trim() || isLoading}
-              className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              Verstuur
-            </button>
-          </div>
-          
-          {isListening && (
-            <div className="mt-2 text-sm text-red-600 flex items-center">
-              <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse mr-2"></div>
-              Luistert naar je Engels...
             </div>
-          )}
+            
+            <div className="grid grid-cols-3 gap-4 mb-3">
+              <div className="text-center">
+                <div className="text-lg font-bold text-blue-600">{speechFeedback.pronunciation}/10</div>
+                <div className="text-xs text-blue-800">Uitspraak</div>
+              </div>
+              <div className="text-center">
+                <div className="text-lg font-bold text-green-600">{speechFeedback.fluency}/10</div>
+                <div className="text-xs text-green-800">Vloeiendheid</div>
+              </div>
+              <div className="text-center">
+                <div className="text-lg font-bold text-purple-600">{speechFeedback.accuracy}/10</div>
+                <div className="text-xs text-purple-800">Nauwkeurigheid</div>
+              </div>
+            </div>
+            
+            <p className="text-sm text-yellow-700 bg-yellow-100 p-2 rounded">
+              {speechFeedback.comments}
+            </p>
+          </div>
+        )}
+
+        {/* Voice Input */}
+        <div className="border-t p-4 bg-gray-50">
+          <div className="flex items-center justify-center space-x-4">
+            {!isTeacherSpeaking ? (
+              <>
+                <button
+                  onClick={isListening ? stopListening : startListening}
+                  disabled={isLoading}
+                  className={`px-6 py-3 rounded-full font-medium transition-all duration-200 flex items-center space-x-2 ${
+                    isListening 
+                      ? 'bg-red-500 text-white animate-pulse shadow-lg' 
+                      : 'bg-green-600 text-white hover:bg-green-700 hover:shadow-md'
+                  }`}
+                >
+                  {isListening ? (
+                    <>
+                      <span className="text-xl">⏹️</span>
+                      <span>Stop Opnemen</span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-xl">🎤</span>
+                      <span>Spreek in het Engels</span>
+                    </>
+                  )}
+                </button>
+                
+                {isListening && (
+                  <div className="text-sm text-red-600 flex items-center">
+                    <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse mr-2"></div>
+                    Luistert naar je uitspraak... (max 10 sec)
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="text-center">
+                <div className="text-lg text-blue-600 font-medium mb-2 flex items-center justify-center">
+                  <span className="animate-pulse mr-2">🔊</span>
+                  Docent spreekt - luister en lees mee
+                </div>
+                <div className="text-sm text-gray-600">
+                  Wacht tot de docent klaar is met spreken voordat je antwoordt
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
