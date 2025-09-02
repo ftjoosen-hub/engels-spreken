@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react'
 import MarkdownRenderer from './MarkdownRenderer'
+import GeminiTTS, { GEMINI_VOICES } from './GeminiTTS'
 
 interface ConversationMessage {
   id: string
@@ -39,13 +40,10 @@ export default function EnglishPracticeApp() {
   const [sessionStarted, setSessionStarted] = useState(false)
   const [showFeedback, setShowFeedback] = useState(false)
   const [sessionFeedback, setSessionFeedback] = useState<any>(null)
-  const [isSpeaking, setIsSpeaking] = useState(false)
-  const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([])
-  const [britishVoice, setBritishVoice] = useState<SpeechSynthesisVoice | null>(null)
+  const [selectedGeminiVoice, setSelectedGeminiVoice] = useState(GEMINI_VOICES.find(v => v.name === 'Charon') || GEMINI_VOICES[2]) // Charon for informative style
   
   const recognitionRef = useRef<any>(null)
   const conversationRef = useRef<HTMLDivElement>(null)
-  const currentUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null)
 
   // Voice recognition setup
   useEffect(() => {
@@ -75,95 +73,12 @@ export default function EnglishPracticeApp() {
     }
   }, [])
 
-  // TTS setup - load British voices
-  useEffect(() => {
-    const loadVoices = () => {
-      const voices = window.speechSynthesis.getVoices()
-      setAvailableVoices(voices)
-      
-      // Find the best British English voice for Cambridge pronunciation
-      const britishVoices = voices.filter(voice => 
-        voice.lang.startsWith('en-GB') || 
-        voice.lang.startsWith('en-UK') ||
-        voice.name.toLowerCase().includes('british') ||
-        voice.name.toLowerCase().includes('uk') ||
-        voice.name.toLowerCase().includes('daniel') ||
-        voice.name.toLowerCase().includes('hazel')
-      )
-      
-      // Prefer premium/neural voices
-      const premiumBritish = britishVoices.find(voice => 
-        voice.name.toLowerCase().includes('neural') ||
-        voice.name.toLowerCase().includes('premium') ||
-        voice.name.toLowerCase().includes('enhanced')
-      )
-      
-      const selectedVoice = premiumBritish || britishVoices[0] || voices.find(v => v.lang.startsWith('en-'))
-      setBritishVoice(selectedVoice)
-      
-      if (selectedVoice) {
-        console.log('Selected British voice:', selectedVoice.name, selectedVoice.lang)
-      }
-    }
-
-    // Load voices immediately and on change
-    loadVoices()
-    if (window.speechSynthesis.onvoiceschanged !== undefined) {
-      window.speechSynthesis.onvoiceschanged = loadVoices
-    }
-    
-    // Cleanup function
-    return () => {
-      if (currentUtteranceRef.current) {
-        window.speechSynthesis.cancel()
-      }
-    }
-  }, [])
   // Auto-scroll to bottom of conversation
   useEffect(() => {
     if (conversationRef.current) {
       conversationRef.current.scrollTop = conversationRef.current.scrollHeight
     }
   }, [conversation])
-
-  // Function to speak teacher messages in British English
-  const speakTeacherMessage = (text: string) => {
-    // Stop any current speech
-    window.speechSynthesis.cancel()
-    
-    if (!britishVoice || !text.trim()) return
-    
-    const utterance = new SpeechSynthesisUtterance(text)
-    utterance.voice = britishVoice
-    utterance.lang = 'en-GB'
-    utterance.rate = 0.9 // Slightly slower for clarity
-    utterance.pitch = 1.0
-    utterance.volume = 0.8
-    
-    utterance.onstart = () => {
-      setIsSpeaking(true)
-    }
-    
-    utterance.onend = () => {
-      setIsSpeaking(false)
-      currentUtteranceRef.current = null
-    }
-    
-    utterance.onerror = () => {
-      setIsSpeaking(false)
-      currentUtteranceRef.current = null
-    }
-    
-    currentUtteranceRef.current = utterance
-    window.speechSynthesis.speak(utterance)
-  }
-
-  // Function to stop current speech
-  const stopSpeaking = () => {
-    window.speechSynthesis.cancel()
-    setIsSpeaking(false)
-    currentUtteranceRef.current = null
-  }
 
   const startSession = async () => {
     if (!selectedTopic) return
@@ -208,10 +123,6 @@ Please start the conversation now with a warm greeting and an opening question a
         }
         setConversation([teacherMessage])
         
-        // Speak the teacher's opening message
-        setTimeout(() => {
-          speakTeacherMessage(data.response)
-        }, 500) // Small delay to ensure UI is updated
       }
     } catch (error) {
       console.error('Error starting session:', error)
@@ -323,10 +234,6 @@ Be encouraging but honest in your assessment.`,
           teacherMessage
         ])
         
-        // Speak the teacher's response
-        setTimeout(() => {
-          speakTeacherMessage(data.response)
-        }, 500) // Small delay to ensure UI is updated
       }
     } catch (error) {
       console.error('Error sending message:', error)
@@ -601,18 +508,10 @@ Base your assessment on A2 level expectations and be constructive and encouragin
               {CONVERSATION_TOPICS.find(t => t.id === selectedTopic)?.title}
             </h2>
             <p className="text-blue-100 text-sm">
-              Gesprek in het Engels - A2 Niveau {britishVoice && `• ${britishVoice.name}`}
+              Gesprek in het Engels - A2 Niveau • Gemini AI TTS ({selectedGeminiVoice.name})
             </p>
           </div>
           <div className="flex items-center space-x-2">
-            {isSpeaking && (
-              <button
-                onClick={stopSpeaking}
-                className="px-3 py-2 bg-red-600 hover:bg-red-700 rounded-lg transition-colors text-sm"
-              >
-                🔇 Stop
-              </button>
-            )}
             <button
               onClick={endSession}
               className="px-4 py-2 bg-blue-700 hover:bg-blue-800 rounded-lg transition-colors"
@@ -638,46 +537,30 @@ Base your assessment on A2 level expectations and be constructive and encouragin
                   className={`max-w-xs lg:max-w-md px-4 py-2 rounded-lg ${
                     message.role === 'student'
                       ? 'bg-blue-600 text-white'
-                      : `bg-gray-200 text-gray-800 ${isSpeaking ? 'ring-2 ring-green-400 ring-opacity-50' : ''}`
+                     : 'bg-gray-200 text-gray-800'
                   }`}
                 >
                   <div className="text-sm font-medium mb-1">
-                    {message.role === 'student' ? 'Jij' : (
-                      <div className="flex items-center">
-                        <span>Docent</span>
-                        {message.role === 'teacher' && (
-                          <div className="ml-2 flex space-x-1">
-                            <button
-                              onClick={() => speakTeacherMessage(message.content)}
-                              disabled={isSpeaking}
-                              className="text-xs bg-green-100 hover:bg-green-200 text-green-700 px-2 py-1 rounded disabled:opacity-50"
-                              title="Herhaal uitspraak"
-                            >
-                              🔊
-                            </button>
-                            {isSpeaking && (
-                              <button
-                                onClick={stopSpeaking}
-                                className="text-xs bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded"
-                                title="Stop uitspraak"
-                              >
-                                ⏹️
-                              </button>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )}
+                    {message.role === 'student' ? 'Jij' : 'Docent'}
                   </div>
                   <div>{message.content}</div>
-                  {message.role === 'teacher' && isSpeaking && (
-                    <div className="mt-2 text-xs text-green-600 flex items-center">
-                      <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse mr-2"></div>
-                      Spreekt...
-                    </div>
-                  )}
                 </div>
               </div>
+             
+             {/* Gemini TTS for teacher messages */}
+             {message.role === 'teacher' && (
+               <div className="flex justify-start mt-2">
+                 <GeminiTTS
+                   content={message.content}
+                   isMarkdown={false}
+                   isStreaming={false}
+                   selectedVoice={selectedGeminiVoice}
+                   selectedEmotion={{ name: 'Professioneel', prompt: 'Spreek dit uit op een professionele, educatieve manier als een vriendelijke docent: ' }}
+                   hideSettings={true}
+                   className="ml-4"
+                 />
+               </div>
+             )}
 
               {/* Feedback for student messages */}
               {message.role === 'student' && message.feedback && (
