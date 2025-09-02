@@ -631,20 +631,51 @@ Base your assessment on A2 level expectations and be constructive and encouragin
             <div key={message.id} className="space-y-2">
               <div
                 className={`flex ${
-                    : `bg-gray-200 text-gray-800 ${isSpeaking ? 'ring-2 ring-green-400 ring-opacity-50' : ''}`
+                  message.role === 'student' ? 'justify-end' : 'justify-start'
                 }`}
               >
                 <div
                   className={`max-w-xs lg:max-w-md px-4 py-2 rounded-lg ${
                     message.role === 'student'
                       ? 'bg-blue-600 text-white'
-                      : 'bg-gray-200 text-gray-800'
+                      : `bg-gray-200 text-gray-800 ${isSpeaking ? 'ring-2 ring-green-400 ring-opacity-50' : ''}`
                   }`}
                 >
                   <div className="text-sm font-medium mb-1">
-                    {message.role === 'student' ? 'Jij' : 'Docent'}
+                    {message.role === 'student' ? 'Jij' : (
+                      <div className="flex items-center">
+                        <span>Docent</span>
+                        {message.role === 'teacher' && (
+                          <div className="ml-2 flex space-x-1">
+                            <button
+                              onClick={() => speakTeacherMessage(message.content)}
+                              disabled={isSpeaking}
+                              className="text-xs bg-green-100 hover:bg-green-200 text-green-700 px-2 py-1 rounded disabled:opacity-50"
+                              title="Herhaal uitspraak"
+                            >
+                              🔊
+                            </button>
+                            {isSpeaking && (
+                              <button
+                                onClick={stopSpeaking}
+                                className="text-xs bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded"
+                                title="Stop uitspraak"
+                              >
+                                ⏹️
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <div>{message.content}</div>
+                  {message.role === 'teacher' && isSpeaking && (
+                    <div className="mt-2 text-xs text-green-600 flex items-center">
+                      <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse mr-2"></div>
+                      Spreekt...
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -674,40 +705,9 @@ Base your assessment on A2 level expectations and be constructive and encouragin
                     <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
                     <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.1s'}}></div>
                     <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
-                  {message.role === 'student' ? 'Jij' : (
-                    <div className="flex items-center">
-                      <span>Docent</span>
-                      {message.role === 'teacher' && (
-                        <div className="ml-2 flex space-x-1">
-                          <button
-                            onClick={() => speakTeacherMessage(message.content)}
-                            disabled={isSpeaking}
-                            className="text-xs bg-green-100 hover:bg-green-200 text-green-700 px-2 py-1 rounded disabled:opacity-50"
-                            title="Herhaal uitspraak"
-                          >
-                            🔊
-                          </button>
-                          {isSpeaking && (
-                            <button
-                              onClick={stopSpeaking}
-                              className="text-xs bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded"
-                              title="Stop uitspraak"
-                            >
-                              ⏹️
-                            </button>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
+                  </div>
                   <span className="text-sm">Docent denkt na...</span>
                 </div>
-                {message.role === 'teacher' && isSpeaking && (
-                  <div className="mt-2 text-xs text-green-600 flex items-center">
-                    <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse mr-2"></div>
-                    Spreekt...
-                  </div>
-                )}
               </div>
             </div>
           )}
